@@ -321,6 +321,40 @@ async def on_video(call: CallbackQuery, state: FSMContext) -> None:
     await send_video(call.message, state)
 
 
+def extract_file_id(message: Message) -> tuple[str, str] | tuple[None, None]:
+    """Возвращает (тип файла, file_id) для присланного медиа."""
+    for kind in ("audio", "video", "voice", "video_note", "animation",
+                 "document", "photo", "sticker"):
+        obj = getattr(message, kind, None)
+        if obj:
+            if kind == "photo":
+                obj = obj[-1]  # самое большое из превью
+            return kind, obj.file_id
+    return None, None
+
+
+async def on_media_sent(message: Message) -> None:
+    """Режим SHOW_FILE_ID: присылаешь боту файл — он отвечает его file_id."""
+    kind, file_id = extract_file_id(message)
+    if not file_id:
+        return
+    await message.answer(
+        f"Тип: <b>{kind}</b>\n"
+        f"file_id (нажми, чтобы скопировать):\n\n"
+        f"<code>{file_id}</code>\n\n"
+        f"<i>Вставь его в content.py. Когда всё вставишь — "
+        f"поставь SHOW_FILE_ID = False.</i>"
+    )
+
+
+if c.SHOW_FILE_ID:
+    dp.message.register(
+        on_media_sent,
+        F.audio | F.video | F.voice | F.video_note | F.animation
+        | F.document | F.photo | F.sticker,
+    )
+
+
 @dp.message(Flow.done)
 async def on_after_done(message: Message, state: FSMContext) -> None:
     await message.answer(c.RESTART_HINT)
