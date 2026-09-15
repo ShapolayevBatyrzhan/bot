@@ -10,11 +10,13 @@
 import asyncio
 import logging
 import os
+import sys
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -336,22 +338,59 @@ async def on_any_other(message: Message, state: FSMContext) -> None:
 
 # ────────────────────────────── запуск ──────────────────────────────
 
+def read_token_from_file(path: Path) -> str:
+    """Достаёт BOT_TOKEN из .env-файла (терпим к пробелам, кавычкам и BOM)."""
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip().upper() == "BOT_TOKEN":
+            return value.strip().strip('"').strip("'")
+    return ""
+
+
 def get_token() -> str:
+    """Токен из переменной окружения BOT_TOKEN или из файла .env рядом с bot.py."""
     token = os.getenv("BOT_TOKEN", "").strip()
+    source = "переменной окружения BOT_TOKEN"
+
     if not token:
-        env_file = BASE_DIR / ".env"
-        if env_file.exists():
-            for line in env_file.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line.startswith("BOT_TOKEN=") and not line.startswith("#"):
-                    token = line.split("=", 1)[1].strip().strip('"').strip("'")
+        # .env.txt — частый случай на Windows, где расширения файлов скрыты
+        for name in (".env", ".env.txt"):
+            env_file = BASE_DIR / name
+            if env_file.exists():
+                token = read_token_from_file(env_file)
+                source = f"файла {env_file}"
+                if token:
                     break
+
     if not token:
-        raise SystemExit(
-            "Не найден токен бота.\n"
-            "Создай файл .env рядом с bot.py и впиши туда:\n"
-            "BOT_TOKEN=123456:твой_токен_от_BotFather"
+        print(
+            "\n"
+            "  ❌ НЕ НАЙДЕН ТОКЕН БОТА\n"
+            "\n"
+            f"  Нужен файл .env вот здесь:\n"
+            f"      {BASE_DIR / '.env'}\n"
+            "\n"
+            "  Внутри одна строка (токен берётся у @BotFather):\n"
+            "      BOT_TOKEN=123456789:AAH...\n"
+            "\n"
+            "  Проверь, что файл называется именно .env, а не .env.txt —\n"
+            "  Windows по умолчанию скрывает расширения файлов.\n",
+            file=sys.stderr,
         )
+        sys.exit(1)
+
+    if ":" not in token or not token.split(":", 1)[0].isdigit():
+        print(
+            f"\n  ❌ Токен из {source} выглядит неправильно: {token[:12]}...\n"
+            "  Он должен быть вида 123456789:AAH... — скопируй его из @BotFather целиком.\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    log.info("Токен взят из %s", source)
     return token
 
 
@@ -360,13 +399,35 @@ async def main() -> None:
         token=get_token(),
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    log.info("Бот запущен")
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    try:
+        me = await bot.get_me()
+        log.info(
+            "Бот запущен: @%s — открой https://t.me/%s и нажми Start",
+            me.username, me.username,
+        )
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
+    except KeyboardInterrupt:
         log.info("Бот остановлен")
+    except TelegramNetworkError:
+        print(
+            "\n  ❌ Не получается достучаться до Telegram (сеть).\n"
+            "  Проверь интернет; если Telegram у провайдера заблокирован — нужен VPN.\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except TelegramUnauthorizedError:
+        print(
+            "\n  ❌ Telegram отклонил токен (Unauthorized).\n"
+            "  Скорее всего он скопирован с ошибкой или бот удалён в @BotFather.\n"
+            "  Возьми токен заново: @BotFather → /mybots → твой бот → API Token.\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
