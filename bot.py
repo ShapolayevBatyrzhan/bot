@@ -28,6 +28,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
+from aiogram.utils.media_group import MediaGroupBuilder
 
 import content as c
 
@@ -50,6 +51,7 @@ class Flow(StatesGroup):
     custom_answer = State()   # ждём текст «своего варианта»
     final_choice = State()    # ждём выбор в финальном блоке
     video = State()           # ждём нажатия кнопки под финальным сообщением
+    after_video = State()     # видео отправлено, ждём кнопку под ним
     done = State()            # всё пройдено
 
 
@@ -139,28 +141,40 @@ async def send_story(message: Message, state: FSMContext, index: int) -> None:
 
 
 async def send_playlist(message: Message, state: FSMContext) -> None:
-    """9 песен + подпись под ними."""
+    """Отправляет плейлист альбомами (до 10 треков в одном сообщении)."""
     await state.set_state(Flow.playlist)
 
-    for i, song in enumerate(c.PLAYLIST, start=1):
-        audio = resolve_media(song.get("file"))
-        if audio is None:
-            # заглушка — файла ещё нет
-            await message.answer(
-                f"🎵 {i}. <b>{song.get('title', '—')}</b> — "
-                f"{song.get('performer', '—')}\n"
-                f"<i>(заглушка: подставь file_id или путь к файлу в content.py)</i>"
-            )
+    # оставляем только песни, у которых указан реальный файл
+    songs = [s for s in c.PLAYLIST if resolve_media(s.get("file")) is not None]
+
+    for i in range(0, len(songs), 10):
+        chunk = songs[i:i + 10]
+
+        # альбом требует минимум 2 элемента — одиночный трек шлём обычным аудио
+        if len(chunk) == 1:
+            song = chunk[0]
+            try:
+                await message.answer_audio(
+                    resolve_media(song["file"]),
+                    title=song.get("title"),
+                    performer=song.get("performer"),
+                )
+            except Exception as e:
+                log.warning("Не удалось отправить песню %s: %s", song.get("title"), e)
             continue
-        try:
-            await message.answer_audio(
-                audio,
+
+        media = MediaGroupBuilder()
+        for song in chunk:
+            media.add_audio(
+                media=resolve_media(song["file"]),
                 title=song.get("title"),
                 performer=song.get("performer"),
             )
+
+        try:
+            await message.answer_media_group(media=media.build())
         except Exception as e:
-            log.warning("Не удалось отправить песню %s: %s", i, e)
-            await message.answer(f"🎵 {i}. {song.get('title', '—')} (не отправилось: {e})")
+            log.warning("Ошибка отправки плейлиста: %s", e)
 
     await message.answer(
         c.PLAYLIST_CAPTION,
@@ -203,22 +217,27 @@ async def send_final_choice(message: Message, state: FSMContext) -> None:
 
 
 async def send_video(message: Message, state: FSMContext) -> None:
-    await state.set_state(Flow.done)
+    """Видео с кнопкой под ним — финальное сообщение придёт только по нажатию."""
+    await state.set_state(Flow.after_video)
+    markup = kb([btn(c.AFTER_VIDEO_BUTTON, "after_video")])
 
     video = resolve_media(c.VIDEO_FILE)
     if video is None:
         await message.answer(
             f"🎬 <i>(заглушка видео: подставь file_id или путь в content.py)</i>\n\n"
-            f"{c.VIDEO_CAPTION}"
+            f"{c.VIDEO_CAPTION}",
+            reply_markup=markup,
         )
-    else:
-        try:
-            await message.answer_video(video, caption=c.VIDEO_CAPTION)
-        except Exception as e:
-            log.warning("Не удалось отправить видео: %s", e)
-            await message.answer(f"🎬 Видео не отправилось ({e})\n\n{c.VIDEO_CAPTION}")
+        return
 
-    await message.answer(c.AFTER_VIDEO_MESSAGE)
+    try:
+        await message.answer_video(video, caption=c.VIDEO_CAPTION, reply_markup=markup)
+    except Exception as e:
+        log.warning("Не удалось отправить видео: %s", e)
+        await message.answer(
+            f"🎬 Видео не отправилось ({e})\n\n{c.VIDEO_CAPTION}",
+            reply_markup=markup,
+        )
 
 
 # ────────────────────────────── хендлеры ──────────────────────────────
@@ -319,6 +338,15 @@ async def on_video(call: CallbackQuery, state: FSMContext) -> None:
     await call.answer()
     await drop_keyboard(call.message)
     await send_video(call.message, state)
+
+
+@dp.callback_query(F.data == "after_video")
+async def on_after_video(call: CallbackQuery, state: FSMContext) -> None:
+    """Кнопка под видео: только теперь отправляем финальное сообщение."""
+    await call.answer()
+    await drop_keyboard(call.message)
+    await state.set_state(Flow.done)
+    await call.message.answer(c.AFTER_VIDEO_MESSAGE)
 
 
 def extract_file_id(message: Message) -> tuple[str, str] | tuple[None, None]:
